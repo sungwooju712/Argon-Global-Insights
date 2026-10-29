@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Malgun Gothic", sans-serif;
+    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), color 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .font-mono,
+  .tabular-nums {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* 다크 모드 전역 표면·배경·보더·텍스트 어댑티브 스타일 */
+html.dark body {
+  background-color: #0B1120;
+  color: #F1F5F9;
+}
+
+html.dark .bg-\[\#F4F6F9\] {
+  background-color: #0B1120 !important;
+}
+
+html.dark .bg-white {
+  background-color: #131E31 !important;
+}
+
+html.dark .bg-\[\#F8FAFC\],
+html.dark .bg-\[\#FAFCFF\] {
+  background-color: #0F172A !important;
+}
+
+html.dark .bg-\[\#F1F5F9\] {
+  background-color: #1E293B !important;
+}
+
+html.dark .hover\:bg-\[\#F8FAFC\]:hover,
+html.dark .hover\:bg-\[\#F1F5F9\]:hover,
+html.dark .hover\:bg-white:hover {
+  background-color: #1E293B !important;
+}
+
+html.dark .bg-\[\#F0FDF4\],
+html.dark .bg-\[\#F0FDF4\]\/65 {
+  background-color: rgba(22, 101, 52, 0.22) !important;
+}
+
+html.dark .hover\:bg-\[\#DCFCE7\]:hover,
+html.dark .hover\:bg-\[\#DCFCE7\]\/60:hover {
+  background-color: rgba(22, 101, 52, 0.35) !important;
+}
+
+html.dark .border-\[\#E2E8F0\],
+html.dark .border-\[\#F1F5F9\],
+html.dark .border-\[\#CBD5E1\] {
+  border-color: #1E293B !important;
+}
+
+html.dark .divide-\[\#F1F5F9\] > :not([hidden]) ~ :not([hidden]) {
+  border-color: #1E293B !important;
+}
+
+html.dark .border-\[\#BBF7D0\] {
+  border-color: rgba(74, 222, 128, 0.3) !important;
+}
+
+html.dark .text-\[\#0F172A\],
+html.dark .text-\[\#1E293B\] {
+  color: #F1F5F9 !important;
+}
+
+html.dark .text-\[\#334155\],
+html.dark .text-\[\#475569\] {
+  color: #CBD5E1 !important;
+}
+
+html.dark .text-\[\#64748B\],
+html.dark .text-\[\#94A3B8\] {
+  color: #94A3B8 !important;
+}
+
+html.dark .text-\[\#166534\] {
+  color: #86EFAC !important;
+}
+
+html.dark .text-\[\#2E7D5B\] {
+  color: #4ADE80 !important;
+}
+
+html.dark .text-\[\#E11D48\] {
+  color: #FB7185 !important;
+}
+
+html.dark .text-\[\#2563EB\] {
+  color: #60A5FA !important;
+}
+
+html.dark input,
+html.dark select,
+html.dark textarea {
+  background-color: #0F172A !important;
+  color: #F1F5F9 !important;
+  border-color: #334155 !important;
+  color-scheme: dark;
+}
+
+html.dark input::placeholder {
+  color: #64748B !important;
+}

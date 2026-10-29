@@ -1,0 +1,6 @@
+{
+  "name": "글로벌 인사이트 - 개인용 한글 해외주식 관리 포터블",
+  "description": "미국, 중국 A주, 홍콩 주식의 관심종목 시세와 한글 재무제표(연간 5년·분기 8개)를 로컬 SQLite로 관리하고 자동 저장 및 이전 상태 복구 기능을 제공하는 개인용 포터블 프로그램",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
