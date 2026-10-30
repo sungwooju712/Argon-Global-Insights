@@ -4,6 +4,7 @@ import {
   Code2,
   Copy,
   Download,
+  Key,
   Play,
   Plus,
   Search,
@@ -12,22 +13,25 @@ import {
 } from 'lucide-react';
 import { buildPortablePythonFiles } from '../data/portablePythonBundle.ts';
 import {
+  ApiCredentialsConfig,
   AutoSaveConfig,
   CollectorTestResult,
   SnapshotRecord,
   WatchlistItem,
   WorkspaceStatePayload,
 } from '../types/stock.ts';
+import { ApiCredentialsSettingsPanel } from './ApiCredentialsSettingsPanel.tsx';
 import { AutoSaveRestorePanel } from './AutoSaveRestorePanel.tsx';
 
 interface DataSettingsViewProps {
-  initialTab?: 'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python';
+  initialTab?: 'api_keys' | 'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python';
   watchlist: WatchlistItem[];
   namesKo: Record<string, string>;
   mapping: Record<string, string>;
   autoSaveConfig: AutoSaveConfig;
   secondsUntilNextSave: number | null;
   snapshots: SnapshotRecord[];
+  apiCredentials: ApiCredentialsConfig;
   onUpdateAutoSaveConfig: (next: Partial<AutoSaveConfig>) => Promise<void>;
   onCreateSnapshot: (triggerType: 'auto' | 'manual', label?: string) => Promise<void>;
   onRestoreSnapshot: (id: number) => Promise<void>;
@@ -37,6 +41,7 @@ interface DataSettingsViewProps {
   onUpdateNameKo: (symbol: string, nameKo: string) => Promise<void>;
   onDeleteNameKo: (symbol: string) => Promise<void>;
   onUpdateMapping: (rawKey: string, labelKo: string) => Promise<void>;
+  onUpdateApiCredentials: (creds: Partial<ApiCredentialsConfig>) => Promise<void>;
 }
 
 export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
@@ -47,6 +52,7 @@ export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
   autoSaveConfig,
   secondsUntilNextSave,
   snapshots,
+  apiCredentials,
   onUpdateAutoSaveConfig,
   onCreateSnapshot,
   onRestoreSnapshot,
@@ -56,10 +62,11 @@ export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
   onUpdateNameKo,
   onDeleteNameKo,
   onUpdateMapping,
+  onUpdateApiCredentials,
 }) => {
-  const [activeTab, setActiveTab] = useState<'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python'>(
-    initialTab
-  );
+  const [activeTab, setActiveTab] = useState<
+    'api_keys' | 'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python'
+  >(initialTab);
 
   // 종목 한글명 사전 입력 상태
   const [newSymbol, setNewSymbol] = useState('');
@@ -96,14 +103,25 @@ export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
     );
   }, [mapping, mapSearch]);
 
+  const configuredKeyCount = useMemo(() => {
+    return [
+      Boolean(apiCredentials.finnhubApiKey?.trim()),
+      Boolean(apiCredentials.secUserAgent?.trim()),
+      Boolean(apiCredentials.alphaVantageApiKey?.trim()),
+      Boolean(apiCredentials.fmpApiKey?.trim()),
+      Boolean(apiCredentials.tushareToken?.trim()),
+    ].filter(Boolean).length;
+  }, [apiCredentials]);
+
   const portableFiles = useMemo(() => {
     return buildPortablePythonFiles(
       namesKo,
       mapping,
       watchlist.map((w) => w.symbol),
-      autoSaveConfig.intervalSeconds
+      autoSaveConfig.intervalSeconds,
+      apiCredentials
     );
-  }, [namesKo, mapping, watchlist, autoSaveConfig.intervalSeconds]);
+  }, [namesKo, mapping, watchlist, autoSaveConfig.intervalSeconds, apiCredentials]);
 
   const handleAddOrUpdateNameKo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -151,6 +169,7 @@ export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
       <div className="bg-white border border-[#E2E8F0] rounded-xl p-2 flex flex-wrap items-center gap-1.5">
         {(
           [
+            { key: 'api_keys', label: `데이터 수집 API 설정 (${configuredKeyCount}개 활성)` },
             { key: 'autosave', label: '자동 저장 · 이전 상태 복구' },
             { key: 'names_ko', label: `종목 한글명 사전 (names_ko.json · ${Object.keys(namesKo).length}개)` },
             { key: 'mapping', label: `재무 항목 대응표 (mapping.json · ${Object.keys(mapping).length}개)` },
@@ -175,6 +194,14 @@ export const DataSettingsView: React.FC<DataSettingsViewProps> = ({
           );
         })}
       </div>
+
+      {/* 탭 0: 데이터 수집 API 연동 및 키 관리 */}
+      {activeTab === 'api_keys' && (
+        <ApiCredentialsSettingsPanel
+          apiCredentials={apiCredentials}
+          onUpdateApiCredentials={onUpdateApiCredentials}
+        />
+      )}
 
       {/* 탭 1: 자동 저장 및 수동 불러오기 (복구) */}
       {activeTab === 'autosave' && (

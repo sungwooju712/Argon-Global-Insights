@@ -1,3 +1,5 @@
+import { ApiCredentialsConfig } from '../types/stock.ts';
+
 export interface PortablePythonFile {
   filename: string;
   path: string;
@@ -10,7 +12,8 @@ export function buildPortablePythonFiles(
   namesKo: Record<string, string>,
   mapping: Record<string, string>,
   watchlistSymbols: string[],
-  autoSaveIntervalSec: number
+  autoSaveIntervalSec: number,
+  apiCredentials?: Partial<ApiCredentialsConfig>
 ): PortablePythonFile[] {
   const readmeContent = `# 글로벌 인사이트 (Global Stock Insight) - 개인용 한글 해외주식 관리 포터블 프로그램
 
@@ -547,6 +550,25 @@ def test_number_formatting_millions():
     assert format_millions(None, "USD") == "-"
 `;
 
+  const envContent = `# 글로벌 인사이트 포터블 - API 환경변수 설정 파일 (.env)
+# 웹 UI '데이터·설정'의 '데이터 수집 API 설정'에서 입력한 키가 자동으로 반영되었습니다.
+
+# 1. 미국 주식 실시간 시세 (Finnhub 무료 API - 분당 60회 이하 제한 준수)
+FINNHUB_API_KEY=${apiCredentials?.finnhubApiKey || 'your_finnhub_api_key_here'}
+
+# 2. 미국 SEC EDGAR XBRL companyfacts API (필수 User-Agent 헤더 - 초당 10회 이하 제한 준수)
+SEC_USER_AGENT="${apiCredentials?.secUserAgent || 'GlobalStockInsight your_email@example.com'}"
+
+# 3. 글로벌 시세 및 보조 지표 (Alpha Vantage)
+ALPHA_VANTAGE_API_KEY=${apiCredentials?.alphaVantageApiKey || ''}
+
+# 4. 다년도 재무제표 보조 API (Financial Modeling Prep)
+FMP_API_KEY=${apiCredentials?.fmpApiKey || ''}
+
+# 5. 중국 A주 및 홍콩 주식 데이터 수집기 (Tushare Pro 토큰)
+TUSHARE_TOKEN=${apiCredentials?.tushareToken || ''}
+`;
+
   return [
     {
       filename: 'README.md',
@@ -561,6 +583,13 @@ def test_number_formatting_millions():
       descriptionKo: 'Python 3.11+ 필수 라이브러리 목록 (Streamlit, AKShare, Requests 등)',
       language: 'text',
       content: requirementsContent,
+    },
+    {
+      filename: '.env',
+      path: '.env',
+      descriptionKo: '사용자가 설정한 API 키가 자동으로 채워진 환경변수 설정 파일',
+      language: 'text',
+      content: envContent,
     },
     {
       filename: 'app.py',

@@ -37,7 +37,19 @@ export interface WatchlistItem {
   warningKo?: string | null;
   addedAt: string;
   history: DailyPricePoint[];
+  group?: string; // 예: '성장주', '배당주', '가치주', '기본' 등 사용자 분류 그룹
 }
+
+export const DEFAULT_WATCHLIST_GROUPS = [
+  '기본',
+  '성장주',
+  '배당주',
+  '가치주',
+  'ETF/원자재',
+  '관찰대상',
+] as const;
+
+export type DefaultWatchlistGroup = typeof DEFAULT_WATCHLIST_GROUPS[number];
 
 export type StatementType = 'IS' | 'BS' | 'CF';
 export type PeriodType = 'annual' | 'quarterly';
@@ -79,6 +91,7 @@ export interface WorkspaceStatePayload {
   version: string;
   exportedAt: string;
   watchlistSymbols: string[];
+  watchlistGroups?: Record<string, string>; // 심볼별 분류 그룹 (예: 'AAPL' -> '성장주')
   namesKo: Record<string, string>;
   customMappings: Record<string, string>;
   autoSaveConfig: AutoSaveConfig;
@@ -91,6 +104,7 @@ export interface WorkspaceStatePayload {
     marketFilter: 'ALL' | MarketCode;
     darkMode?: boolean;
   };
+  apiCredentials?: Partial<ApiCredentialsConfig>;
 }
 
 export interface SnapshotRecord {
@@ -116,3 +130,24 @@ export interface CollectorTestResult {
   messageKo: string;
   sampleFields: { rawKey: string; labelKo: string; sampleValue: string }[];
 }
+
+export interface ApiCredentialsConfig {
+  finnhubApiKey: string;
+  secUserAgent: string;
+  alphaVantageApiKey: string;
+  fmpApiKey: string;
+  tushareToken: string;
+  updatedAt?: string;
+}
+
+export interface ApiTestProbeResult {
+  apiType: 'finnhub' | 'sec' | 'alpha_vantage' | 'fmp' | 'tushare';
+  nameKo: string;
+  status: 'success' | 'error' | 'warning' | 'unconfigured';
+  latencyMs: number;
+  messageKo: string;
+  testedAt: string;
+  endpointUrl: string;
+  sampleData?: string;
+}
+

@@ -10,7 +10,7 @@ interface WatchlistAllocationPieChartProps {
   onOpenAddModal: () => void;
 }
 
-type DimensionMode = 'market' | 'sector';
+type DimensionMode = 'market' | 'sector' | 'group';
 type WeightMode = 'count' | 'marketCap';
 
 interface PieSliceData {
@@ -30,6 +30,15 @@ const MARKET_COLORS: Record<string, string> = {
   US: '#2563EB', // 미국 - 로얄 블루
   CN: '#E11D48', // 중국 A주 - 크림슨 레드
   HK: '#2E7D5B', // 홍콩 - 에메랄드 그린
+};
+
+const GROUP_COLORS: Record<string, string> = {
+  '성장주': '#10B981', // 에메랄드
+  '배당주': '#3B82F6', // 블루
+  '가치주': '#F59E0B', // 앰버
+  'ETF/원자재': '#8B5CF6', // 퍼플
+  '관찰대상': '#06B6D4', // 시안
+  '기본': '#64748B', // 슬레이트
 };
 
 const SECTOR_PALETTE = [
@@ -129,7 +138,9 @@ export const WatchlistAllocationPieChart: React.FC<WatchlistAllocationPieChartPr
       const groupKey =
         dimension === 'market'
           ? item.market
-          : item.sectorKo || '기타 섹터';
+          : dimension === 'sector'
+          ? item.sectorKo || '기타 섹터'
+          : item.group || '기본';
       const groupLabel =
         dimension === 'market'
           ? item.market === 'US'
@@ -137,7 +148,9 @@ export const WatchlistAllocationPieChart: React.FC<WatchlistAllocationPieChartPr
             : item.market === 'CN'
             ? '중국 A주 (CN)'
             : '홍콩 (HK)'
-          : item.sectorKo || '기타 섹터';
+          : dimension === 'sector'
+          ? item.sectorKo || '기타 섹터'
+          : `${item.group || '기본'}`;
 
       const capUsd = Math.round(
         item.marketCapMillions * (FX_TO_USD[item.currency] || 1)
@@ -181,6 +194,8 @@ export const WatchlistAllocationPieChart: React.FC<WatchlistAllocationPieChartPr
       const color =
         dimension === 'market'
           ? MARKET_COLORS[g.key] || SECTOR_PALETTE[idx % SECTOR_PALETTE.length]
+          : dimension === 'group'
+          ? GROUP_COLORS[g.key] || SECTOR_PALETTE[idx % SECTOR_PALETTE.length]
           : SECTOR_PALETTE[idx % SECTOR_PALETTE.length];
 
       return {
@@ -211,17 +226,21 @@ export const WatchlistAllocationPieChart: React.FC<WatchlistAllocationPieChartPr
           <div className="flex items-center gap-2">
             <PieChartIcon className="w-4 h-4 text-[#2E7D5B]" />
             <h2 className="text-[16px] font-bold text-[#0F172A] tracking-tight">
-              관심종목 포트폴리오 비중 ({dimension === 'market' ? '시장별' : '섹터별'})
+              관심종목 포트폴리오 비중 ({dimension === 'market' ? '시장별' : dimension === 'sector' ? '섹터별' : '그룹별 (성장주·배당주)'})
             </h2>
           </div>
           <p className="text-xs text-[#64748B] mt-0.5 tabular-nums">
             현재 관심종목({watchlist.length}개) 기준{' '}
-            {dimension === 'market' ? '미국 · 중국 A주 · 홍콩 시장' : '산업 섹터'} 구성 비율
+            {dimension === 'market'
+              ? '미국 · 중국 A주 · 홍콩 시장'
+              : dimension === 'sector'
+              ? '산업 섹터'
+              : '사용자 지정 그룹(성장주·배당주 등)'} 구성 비율
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* 시장별 / 섹터별 전환 */}
+          {/* 시장별 / 섹터별 / 그룹별 전환 */}
           <div className="flex items-center bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg p-0.5">
             <button
               type="button"
@@ -244,6 +263,17 @@ export const WatchlistAllocationPieChart: React.FC<WatchlistAllocationPieChartPr
               }`}
             >
               섹터별
+            </button>
+            <button
+              type="button"
+              onClick={() => setDimension('group')}
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                dimension === 'group'
+                  ? 'bg-white text-[#0F172A] font-semibold border border-[#CBD5E1]'
+                  : 'text-[#64748B] hover:text-[#0F172A]'
+              }`}
+            >
+              그룹별 (성장주·배당주)
             </button>
           </div>
 

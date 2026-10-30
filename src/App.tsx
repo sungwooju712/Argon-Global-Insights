@@ -13,6 +13,9 @@ import {
   Database,
   Download,
   FileSpreadsheet,
+  FileText,
+  Folder,
+  FolderPlus,
   HelpCircle,
   History,
   LayoutGrid,
@@ -26,6 +29,7 @@ import {
   Settings2,
   Star,
   Sun,
+  Tag,
   Trash2,
   TrendingUp,
   Upload,
@@ -34,16 +38,20 @@ import {
 import { DataSettingsView } from './components/DataSettingsView.tsx';
 import { FinancialStatementView } from './components/FinancialStatementView.tsx';
 import { PerformanceChart } from './components/PerformanceChart.tsx';
+import { SortableTableHeader } from './components/SortableTableHeader.tsx';
 import { TutorialHelpView } from './components/TutorialHelpView.tsx';
 import { WatchlistAllocationPieChart } from './components/WatchlistAllocationPieChart.tsx';
 import {
+  ApiCredentialsConfig,
   AutoSaveConfig,
+  DEFAULT_WATCHLIST_GROUPS,
   MarketCode,
   SnapshotRecord,
   StockUniverseItem,
   WatchlistItem,
   WorkspaceStatePayload,
 } from './types/stock.ts';
+import { exportDashboardPdfReport } from './utils/pdfReportExporter.ts';
 
 type ActiveMenu =
   | 'dashboard'
@@ -61,11 +69,30 @@ interface EnrichedUniverseItem extends StockUniverseItem {
   changePercent: number;
 }
 
+type DashboardSortField =
+  | 'default'
+  | 'name'
+  | 'market'
+  | 'group'
+  | 'price'
+  | 'changePercent'
+  | 'marketCapMillions';
+
+type SortDirection = 'asc' | 'desc';
+
 export default function App() {
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>('dashboard');
   const [settingsSubTab, setSettingsSubTab] = useState<
-    'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python'
-  >('names_ko');
+    'api_keys' | 'autosave' | 'names_ko' | 'mapping' | 'tests' | 'python'
+  >('api_keys');
+
+  const [apiCredentials, setApiCredentials] = useState<ApiCredentialsConfig>({
+    finnhubApiKey: '',
+    secUserAgent: 'GlobalStockInsight sungwoo.ju@gmail.com',
+    alphaVantageApiKey: '',
+    fmpApiKey: '',
+    tushareToken: '',
+  });
 
   const [referenceDate, setReferenceDate] = useState<string>('2026-10-29');
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
@@ -103,6 +130,7 @@ export default function App() {
 
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [exportingPdf, setExportingPdf] = useState<boolean>(false);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
 
   // 상단 검색창 및 모달 상태
@@ -117,9 +145,29 @@ export default function App() {
     'watchlist'
   );
 
+  // 대시보드 및 관심종목 그룹 필터 상태 ('ALL' 또는 '성장주', '배당주' 등)
+  const [dashboardGroupFilter, setDashboardGroupFilter] = useState<string>('ALL');
+  const [watchlistGroupFilter, setWatchlistGroupFilter] = useState<string>('ALL');
+  const [addCustomGroup, setAddCustomGroup] = useState<string>('성장주');
+
+  // 대시보드 하단 테이블 정렬 상태
+  const [dashboardSortField, setDashboardSortField] = useState<DashboardSortField>('default');
+  const [dashboardSortDirection, setDashboardSortDirection] = useState<SortDirection>('desc');
+
   // 종목검색 화면 필터 상태
   const [searchPageQuery, setSearchPageQuery] = useState<string>('');
   const [searchMarketFilter, setSearchMarketFilter] = useState<'ALL' | MarketCode>('ALL');
+
+  // 등록된 관심종목에서 추출한 고유 그룹 목록
+  const availableGroups = useMemo(() => {
+    const set = new Set<string>(['기본', '성장주', '배당주', '가치주']);
+    for (const w of watchlist) {
+      if (w.group && w.group.trim()) {
+        set.add(w.group.trim());
+      }
+    }
+    return Array.from(set);
+  }, [watchlist]);
 
   // 자동저장 카운트다운 타이머
   const [secondsUntilNextSave, setSecondsUntilNextSave] = useState<number | null>(60);
@@ -143,6 +191,7 @@ export default function App() {
       setUniverse(data.universe || []);
       setNamesKo(data.namesKo || {});
       setMapping(data.mapping || {});
+      if (data.apiCredentials) setApiCredentials(data.apiCredentials);
       if (data.autoSaveConfig) setAutoSaveConfig(data.autoSaveConfig);
       if (data.uiPreferences) {
         setUiPreferences(data.uiPreferences);
@@ -250,15 +299,57 @@ export default function App() {
     return () => clearInterval(timer);
   }, [autoSaveConfig.enabled, autoSaveConfig.intervalSeconds, handleCreateSnapshot]);
 
+  const getGroupBadgeClass = useCallback(
+    (groupName?: string) => {
+      const g = groupName || '기본';
+      switch (g) {
+        case '성장주':
+          return isDarkMode
+            ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+            : 'bg-[#F0FDF4] text-[#166534] border-[#BBF7D0]';
+        case '배당주':
+          return isDarkMode
+            ? 'bg-blue-950/70 text-blue-300 border-blue-700/60'
+            : 'bg-[#EFF6FF] text-[#1D4ED8] border-[#BFDBFE]';
+        case '가치주':
+          return isDarkMode
+            ? 'bg-amber-950/70 text-amber-300 border-amber-700/60'
+            : 'bg-[#FFFBEB] text-[#B45309] border-[#FDE68A]';
+        case 'ETF/원자재':
+          return isDarkMode
+            ? 'bg-purple-950/70 text-purple-300 border-purple-700/60'
+            : 'bg-[#FAF5FF] text-[#6B21A8] border-[#E9D5FF]';
+        case '관찰대상':
+          return isDarkMode
+            ? 'bg-cyan-950/70 text-cyan-300 border-cyan-700/60'
+            : 'bg-[#ECFEFF] text-[#0E7490] border-[#A5F3FC]';
+        default:
+          return isDarkMode
+            ? 'bg-slate-800 text-slate-300 border-slate-700'
+            : 'bg-[#F8FAFC] text-[#475569] border-[#E2E8F0]';
+      }
+    },
+    [isDarkMode]
+  );
+
   // 관심종목 추가
-  const handleAddWatchlist = async (symbolOrQuery: string, customKo?: string) => {
+  const handleAddWatchlist = async (
+    symbolOrQuery: string,
+    customKo?: string,
+    group?: string
+  ) => {
     const clean = symbolOrQuery.trim();
     if (!clean) return;
     try {
+      const targetGroup = group || addCustomGroup || '기본';
       const resp = await fetch('/api/watchlist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: clean, customNameKo: customKo }),
+        body: JSON.stringify({
+          query: clean,
+          customNameKo: customKo,
+          group: targetGroup,
+        }),
       });
       const data = await resp.json();
       if (!resp.ok) {
@@ -267,10 +358,45 @@ export default function App() {
       }
       await loadBootstrap();
       showNotice(
-        `${data.item.nameKo} (${data.item.symbol}) 종목이 관심종목에 추가되고 로컬 SQLite에 저장되었습니다.`
+        `${data.item.nameKo} (${data.item.symbol}) 종목이 [${data.item.group || targetGroup}] 그룹에 추가되었습니다.`
       );
     } catch {
       showNotice('관심종목 추가 중 오류가 발생했습니다.');
+    }
+  };
+
+  // 관심종목 그룹/폴더 변경 (성장주, 배당주 등)
+  const handleUpdateStockGroup = async (symbol: string, newGroup: string) => {
+    const cleanGroup = newGroup.trim() || '기본';
+    // 낙관적 UI 업데이트
+    setWatchlist((prev) =>
+      prev.map((item) =>
+        item.symbol.toUpperCase() === symbol.toUpperCase()
+          ? { ...item, group: cleanGroup }
+          : item
+      )
+    );
+
+    try {
+      const resp = await fetch(`/api/watchlist/${encodeURIComponent(symbol)}/group`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group: cleanGroup }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showNotice(data.error || '그룹 변경에 실패했습니다.');
+        await loadBootstrap();
+        return;
+      }
+      if (data.snapshot) {
+        setSnapshots((prev) => [data.snapshot, ...prev.slice(0, 29)]);
+      }
+      const disp = namesKo[symbol] || symbol;
+      showNotice(`${disp} (${symbol}) 종목이 '${cleanGroup}' 그룹으로 변경되었습니다.`);
+    } catch {
+      showNotice('종목 그룹 변경 중 오류가 발생했습니다.');
+      await loadBootstrap();
     }
   };
 
@@ -358,6 +484,26 @@ export default function App() {
     }
   };
 
+  // 데이터 수집 API 설정 및 인증키 업데이트
+  const handleUpdateApiCredentials = async (nextCreds: Partial<ApiCredentialsConfig>) => {
+    try {
+      const resp = await fetch('/api/api-credentials', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nextCreds),
+      });
+      if (!resp.ok) throw new Error('API 설정 저장 실패');
+      const data = await resp.json();
+      setApiCredentials(data.apiCredentials);
+      if (data.snapshot) {
+        setSnapshots((prev) => [data.snapshot, ...prev]);
+      }
+      showNotice('데이터 수집 API 설정이 저장되었습니다.');
+    } catch (err: unknown) {
+      showNotice(err instanceof Error ? err.message : 'API 설정 저장 중 오류가 발생했습니다.');
+    }
+  };
+
   // 차트 기간/단위 설정 업데이트
   const handleUpdateChartPrefs = async (
     prefs: Partial<WorkspaceStatePayload['uiPreferences']>
@@ -433,6 +579,7 @@ export default function App() {
       '종목코드',
       '종목명(한글)',
       '원문종목명',
+      '분류그룹',
       '시장',
       '통화',
       '현재가',
@@ -446,6 +593,7 @@ export default function App() {
         w.symbol,
         `"${w.nameKo}"`,
         `"${w.nameOriginal}"`,
+        `"${w.group || '기본'}"`,
         w.market,
         w.currency,
         w.price,
@@ -515,6 +663,39 @@ export default function App() {
     };
   }, [universe, watchlist]);
 
+  // PDF 보고서(jsPDF) 내보내기 핸들러
+  const handleExportPdfReport = async () => {
+    if (exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const rangeLabelMap: Record<string, string> = {
+        '1M': '1개월',
+        '3M': '3개월',
+        '6M': '6개월',
+        '1Y': '1년',
+        ALL: '전체',
+        CUSTOM: '사용자 지정',
+      };
+      await exportDashboardPdfReport({
+        referenceDate,
+        watchlist,
+        namesKo,
+        chartRangeLabel: rangeLabelMap[uiPreferences.chartRange] || '3개월',
+        chartStartDate: uiPreferences.chartStartDate || '2026-07-23',
+        chartEndDate: uiPreferences.chartEndDate || referenceDate,
+        stats,
+      });
+      showNotice(
+        `현재 관심종목 통계 및 수익률·비중 차트가 포함된 PDF 보고서(글로벌인사이트_관심종목_PDF보고서_${referenceDate}.pdf)가 저장되었습니다.`
+      );
+    } catch (err) {
+      console.error('PDF export error:', err);
+      showNotice('PDF 보고서 생성 중 오류가 발생했습니다.');
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   const filteredUniverseForSearch = useMemo(() => {
     const q = searchPageQuery.trim().toLowerCase();
     return universe.filter((item) => {
@@ -530,6 +711,105 @@ export default function App() {
       );
     });
   }, [universe, searchPageQuery, searchMarketFilter]);
+
+  // 대시보드 테이블 정렬 클릭 핸들러
+  const handleDashboardSort = (field: DashboardSortField) => {
+    if (dashboardSortField !== field) {
+      setDashboardSortField(field);
+      setDashboardSortDirection(
+        field === 'price' || field === 'changePercent' || field === 'marketCapMillions'
+          ? 'desc'
+          : 'asc'
+      );
+    } else {
+      const defaultDir: SortDirection =
+        field === 'price' || field === 'changePercent' || field === 'marketCapMillions'
+          ? 'desc'
+          : 'asc';
+      if (dashboardSortDirection === defaultDir) {
+        setDashboardSortDirection(defaultDir === 'desc' ? 'asc' : 'desc');
+      } else {
+        setDashboardSortField('default');
+        setDashboardSortDirection('desc');
+      }
+    }
+  };
+
+  const handleResetDashboardSort = () => {
+    setDashboardSortField('default');
+    setDashboardSortDirection('desc');
+  };
+
+  const getSortLabel = (field: DashboardSortField) => {
+    switch (field) {
+      case 'name':
+        return '종목명';
+      case 'market':
+        return '시장';
+      case 'group':
+        return '그룹';
+      case 'price':
+        return '현재가';
+      case 'changePercent':
+        return '등락률';
+      case 'marketCapMillions':
+        return '시가총액';
+      default:
+        return '기본';
+    }
+  };
+
+  // 대시보드 하단 테이블 정렬 및 필터링된 행 목록
+  const sortedDashboardRows = useMemo(() => {
+    let source: (WatchlistItem | EnrichedUniverseItem)[] =
+      dashboardTableMode === 'watchlist' ? watchlist : universe;
+
+    // 관심종목 보기 시 그룹 필터 적용
+    if (dashboardTableMode === 'watchlist' && dashboardGroupFilter !== 'ALL') {
+      source = (source as WatchlistItem[]).filter(
+        (w) => (w.group || '기본') === dashboardGroupFilter
+      );
+    }
+
+    if (dashboardSortField === 'default') {
+      return source;
+    }
+    return [...source].sort((a, b) => {
+      let comparison = 0;
+      if (dashboardSortField === 'name') {
+        const nameA = namesKo[a.symbol] || a.nameKo;
+        const nameB = namesKo[b.symbol] || b.nameKo;
+        comparison = nameA.localeCompare(nameB, 'ko-KR');
+        if (comparison === 0) {
+          comparison = a.symbol.localeCompare(b.symbol);
+        }
+      } else if (dashboardSortField === 'market') {
+        comparison = a.market.localeCompare(b.market);
+        if (comparison === 0) {
+          comparison = a.currency.localeCompare(b.currency);
+        }
+      } else if (dashboardSortField === 'group') {
+        const grpA = (a as WatchlistItem).group || '기본';
+        const grpB = (b as WatchlistItem).group || '기본';
+        comparison = grpA.localeCompare(grpB, 'ko-KR');
+      } else if (dashboardSortField === 'price') {
+        comparison = a.price - b.price;
+      } else if (dashboardSortField === 'changePercent') {
+        comparison = a.changePercent - b.changePercent;
+      } else if (dashboardSortField === 'marketCapMillions') {
+        comparison = a.marketCapMillions - b.marketCapMillions;
+      }
+      return dashboardSortDirection === 'asc' ? comparison : -comparison;
+    });
+  }, [
+    dashboardTableMode,
+    watchlist,
+    universe,
+    dashboardGroupFilter,
+    dashboardSortField,
+    dashboardSortDirection,
+    namesKo,
+  ]);
 
   const menuHeaderMeta: Record<ActiveMenu, { title: string; subtitle: string }> = {
     dashboard: {
@@ -554,7 +834,7 @@ export default function App() {
     },
     settings: {
       title: '데이터 · 설정',
-      subtitle: '종목 한글명 사전(names_ko.json), 재무 대응표(mapping.json), 수집기 테스트 및 파이썬 포터블 패키지',
+      subtitle: '데이터 수집 API 설정(.env/SQLite), 종목 한글명 사전(names_ko.json), 재무 대응표(mapping.json), 단위 테스트 및 파이썬 포터블 패키지',
     },
     tutorial: {
       title: '튜토리얼 · 도움말',
@@ -662,7 +942,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setSettingsSubTab('names_ko');
+                  setSettingsSubTab('api_keys');
                   setActiveMenu('settings');
                 }}
                 className={`w-full flex items-center gap-2.5 px-3 py-2 text-[13px] font-medium rounded-lg transition-colors ${
@@ -816,6 +1096,18 @@ export default function App() {
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               <span>새로고침</span>
+            </button>
+
+            {/* PDF 보고서 저장 버튼 */}
+            <button
+              type="button"
+              onClick={handleExportPdfReport}
+              disabled={exportingPdf}
+              title="현재 관심종목 통계, 수익률 흐름 차트, 시장/섹터 비중 차트를 PDF 문서로 저장"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#2E7D5B] bg-[#F0FDF4] border border-[#BBF7D0] hover:bg-[#DCFCE7] rounded-lg transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>{exportingPdf ? 'PDF 생성 중...' : 'PDF 보고서'}</span>
             </button>
 
             {/* 낮/밤(라이트/다크) 모드 테마 전환 토글 버튼 */}
@@ -1108,14 +1400,28 @@ export default function App() {
                             <span>자동저장 및 이전 상태 복구</span>
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={handleExportWatchlistCsv}
-                            className="w-full py-2 px-3 text-xs font-medium text-[#1E293B] bg-white border border-[#E2E8F0] hover:bg-[#F8FAFC] rounded-lg transition-colors flex items-center gap-2"
-                          >
-                            <FileSpreadsheet className="w-3.5 h-3.5 text-[#64748B]" />
-                            <span>엑셀(CSV) 보고서</span>
-                          </button>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={handleExportPdfReport}
+                              disabled={exportingPdf}
+                              className="w-full py-2 px-2.5 text-xs font-semibold text-[#2E7D5B] bg-[#F0FDF4] border border-[#BBF7D0] hover:bg-[#DCFCE7] rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              <FileText className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">
+                                {exportingPdf ? '생성 중...' : 'PDF 보고서'}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={handleExportWatchlistCsv}
+                              className="w-full py-2 px-2.5 text-xs font-medium text-[#1E293B] bg-white border border-[#E2E8F0] hover:bg-[#F8FAFC] rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                            >
+                              <FileSpreadsheet className="w-3.5 h-3.5 text-[#64748B] shrink-0" />
+                              <span className="truncate">엑셀(CSV)</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1134,13 +1440,31 @@ export default function App() {
                   <div className="bg-white border border-[#E2E8F0] rounded-xl p-5">
                     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                       <div>
-                        <h2 className="text-[16px] font-bold text-[#0F172A]">
-                          {dashboardTableMode === 'watchlist'
-                            ? '내 관심종목 시세 및 재무제표 바로가기'
-                            : '글로벌 시가총액 상위 종목 (미국 · 중국 A주 · 홍콩)'}
-                        </h2>
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <h2 className="text-[16px] font-bold text-[#0F172A]">
+                            {dashboardTableMode === 'watchlist'
+                              ? '내 관심종목 시세 및 재무제표 바로가기'
+                              : '글로벌 시가총액 상위 종목 (미국 · 중국 A주 · 홍콩)'}
+                          </h2>
+                          {dashboardSortField !== 'default' && (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#2E7D5B] bg-[#F0FDF4] border border-[#BBF7D0] px-2 py-0.5 rounded-md">
+                              <span>
+                                정렬: {getSortLabel(dashboardSortField)} (
+                                {dashboardSortDirection === 'asc' ? '오름차순 ▲' : '내림차순 ▼'})
+                              </span>
+                              <button
+                                type="button"
+                                onClick={handleResetDashboardSort}
+                                title="정렬 초기화"
+                                className="text-[#64748B] hover:text-[#166534] ml-0.5"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-[#64748B] mt-0.5">
-                          종목명을 클릭하면 연간(5년)·분기(8개) 한글 재무제표 화면으로 이동합니다. (단위: 백만 · 원래 통화 표시)
+                          각 열 헤더(종목명, 시장, 현재가, 등락률, 시가총액)를 클릭해 오름차순/내림차순으로 정렬할 수 있습니다.
                         </p>
                       </div>
 
@@ -1180,21 +1504,134 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* 관심종목 모드 시 그룹 필터 바 */}
+                    {dashboardTableMode === 'watchlist' && (
+                      <div className="flex flex-wrap items-center gap-1.5 mb-3.5 pb-3 border-b border-[#F1F5F9] dark:border-slate-800">
+                        <span className="text-xs font-semibold text-[#64748B] flex items-center gap-1.5 mr-1">
+                          <Folder className="w-3.5 h-3.5 text-[#2E7D5B]" />
+                          분류 그룹:
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setDashboardGroupFilter('ALL')}
+                          className={`px-2.5 py-1 text-xs rounded-lg transition-colors font-medium ${
+                            dashboardGroupFilter === 'ALL'
+                              ? 'bg-[#0F172A] text-white font-semibold shadow-sm'
+                              : 'bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] hover:bg-[#F1F5F9]'
+                          }`}
+                        >
+                          전체 ({watchlist.length})
+                        </button>
+                        {availableGroups.map((grp) => {
+                          const count = watchlist.filter(
+                            (w) => (w.group || '기본') === grp
+                          ).length;
+                          return (
+                            <button
+                              key={grp}
+                              type="button"
+                              onClick={() => setDashboardGroupFilter(grp)}
+                              className={`px-2.5 py-1 text-xs rounded-lg transition-colors font-medium flex items-center gap-1.5 ${
+                                dashboardGroupFilter === grp
+                                  ? 'bg-[#2E7D5B] text-white font-semibold shadow-sm'
+                                  : 'bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] hover:bg-[#F1F5F9]'
+                              }`}
+                            >
+                              <span>{grp}</span>
+                              <span
+                                className={`px-1.5 py-0.2 rounded-full text-[10px] tabular-nums ${
+                                  dashboardGroupFilter === grp
+                                    ? 'bg-white/20 text-white'
+                                    : 'bg-slate-200/80 text-slate-700'
+                                }`}
+                              >
+                                {count}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
                     <div className="overflow-x-auto">
                       <table className="w-full text-left border-collapse">
                         <thead>
-                          <tr className="border-b border-[#E2E8F0] text-xs font-medium text-[#64748B]">
-                            <th className="py-2.5 px-3 w-10 text-center">#</th>
-                            <th className="py-2.5 px-3">종목명 (한글명 우선 · 종목코드)</th>
-                            <th className="py-2.5 px-3">시장 · 통화</th>
-                            <th className="py-2.5 px-3 text-right">현재가</th>
-                            <th className="py-2.5 px-3 text-right">등락률</th>
-                            <th className="py-2.5 px-3 text-right">시가총액 (단위: 백만)</th>
-                            <th className="py-2.5 px-3 text-right">관리 / 재무제표</th>
+                          <tr className="border-b border-[#E2E8F0] dark:border-slate-700 text-xs font-medium text-[#64748B]">
+                            <th
+                              className={`py-2 px-3 w-12 text-center transition-colors ${
+                                dashboardSortField === 'default'
+                                  ? 'bg-[#F8FAFC] dark:bg-slate-800/60'
+                                  : ''
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={handleResetDashboardSort}
+                                title="기본 정렬 순서로 복원"
+                                className={`inline-flex items-center justify-center w-6 h-6 rounded-md transition-colors cursor-pointer select-none ${
+                                  dashboardSortField === 'default'
+                                    ? 'font-bold text-[#2E7D5B] bg-[#F0FDF4] dark:bg-emerald-950/40 border border-[#BBF7D0] dark:border-emerald-800/60'
+                                    : 'text-[#64748B] hover:text-[#0F172A] hover:bg-[#F1F5F9] dark:hover:bg-slate-800'
+                                }`}
+                              >
+                                #
+                              </button>
+                            </th>
+                            <SortableTableHeader
+                              label="종목명 (한글명 우선 · 종목코드)"
+                              field="name"
+                              activeField={dashboardSortField}
+                              direction={dashboardSortDirection}
+                              onSort={handleDashboardSort}
+                              align="left"
+                            />
+                            <SortableTableHeader
+                              label="시장 · 통화"
+                              field="market"
+                              activeField={dashboardSortField}
+                              direction={dashboardSortDirection}
+                              onSort={handleDashboardSort}
+                              align="left"
+                            />
+                            {dashboardTableMode === 'watchlist' && (
+                              <SortableTableHeader
+                                label="그룹 / 폴더"
+                                field="group"
+                                activeField={dashboardSortField}
+                                direction={dashboardSortDirection}
+                                onSort={handleDashboardSort}
+                                align="center"
+                              />
+                            )}
+                            <SortableTableHeader
+                              label="현재가"
+                              field="price"
+                              activeField={dashboardSortField}
+                              direction={dashboardSortDirection}
+                              onSort={handleDashboardSort}
+                              align="right"
+                            />
+                            <SortableTableHeader
+                              label="등락률"
+                              field="changePercent"
+                              activeField={dashboardSortField}
+                              direction={dashboardSortDirection}
+                              onSort={handleDashboardSort}
+                              align="right"
+                            />
+                            <SortableTableHeader
+                              label="시가총액 (단위: 백만)"
+                              field="marketCapMillions"
+                              activeField={dashboardSortField}
+                              direction={dashboardSortDirection}
+                              onSort={handleDashboardSort}
+                              align="right"
+                            />
+                            <th className="py-2 px-3 text-right">관리 / 재무제표</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-[#F1F5F9] text-[13px]">
-                          {(dashboardTableMode === 'watchlist' ? watchlist : universe).map(
+                          {sortedDashboardRows.map(
                             (row, idx) => {
                               const isPositive = row.changePercent > 0;
                               const isNegative = row.changePercent < 0;
@@ -1205,12 +1642,18 @@ export default function App() {
                               return (
                                 <tr
                                   key={row.symbol}
-                                  className="hover:bg-[#F8FAFC] transition-colors"
+                                  className="hover:bg-[#F8FAFC] dark:hover:bg-slate-800/50 transition-colors"
                                 >
                                   <td className="py-3 px-3 text-center font-mono tabular-nums text-xs text-[#64748B]">
                                     {idx + 1}
                                   </td>
-                                  <td className="py-3 px-3">
+                                  <td
+                                    className={`py-3 px-3 transition-colors ${
+                                      dashboardSortField === 'name'
+                                        ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20'
+                                        : ''
+                                    }`}
+                                  >
                                     <button
                                       type="button"
                                       onClick={() => openStockAnalysis(row.symbol)}
@@ -1224,7 +1667,13 @@ export default function App() {
                                       </span>
                                     </button>
                                   </td>
-                                  <td className="py-3 px-3 text-xs text-[#475569]">
+                                  <td
+                                    className={`py-3 px-3 text-xs text-[#475569] transition-colors ${
+                                      dashboardSortField === 'market'
+                                        ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20 font-medium text-[#0F172A]'
+                                        : ''
+                                    }`}
+                                  >
                                     {row.market === 'US'
                                       ? '미국'
                                       : row.market === 'CN'
@@ -1232,7 +1681,62 @@ export default function App() {
                                       : '홍콩'}{' '}
                                     · {row.currency}
                                   </td>
-                                  <td className="py-3 px-3 text-right font-mono tabular-nums font-semibold text-[#0F172A]">
+                                  {dashboardTableMode === 'watchlist' && (
+                                    <td
+                                      className={`py-3 px-3 text-center transition-colors ${
+                                        dashboardSortField === 'group'
+                                          ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20'
+                                          : ''
+                                      }`}
+                                    >
+                                      <div className="relative inline-flex items-center">
+                                        <select
+                                          value={(row as WatchlistItem).group || '기본'}
+                                          onChange={(e) => {
+                                            const val = e.target.value;
+                                            if (val === '__custom__') {
+                                              const custom = window.prompt(
+                                                '새 그룹/폴더 이름을 입력하세요 (예: 성장주, 배당주, 반도체):'
+                                              );
+                                              if (custom && custom.trim()) {
+                                                handleUpdateStockGroup(row.symbol, custom.trim());
+                                              }
+                                            } else {
+                                              handleUpdateStockGroup(row.symbol, val);
+                                            }
+                                          }}
+                                          className={`text-[11px] font-semibold px-2 py-0.5 rounded-md border appearance-none cursor-pointer pr-5 focus:outline-none transition-colors ${getGroupBadgeClass(
+                                            (row as WatchlistItem).group
+                                          )}`}
+                                          title="클릭하여 분류 그룹 변경"
+                                        >
+                                          {availableGroups.map((grp) => (
+                                            <option
+                                              key={grp}
+                                              value={grp}
+                                              className="bg-white dark:bg-slate-800 text-[#0F172A] dark:text-white"
+                                            >
+                                              {grp}
+                                            </option>
+                                          ))}
+                                          <option
+                                            value="__custom__"
+                                            className="bg-white dark:bg-slate-800 text-[#2E7D5B] font-bold"
+                                          >
+                                            + 새 그룹 직접 입력...
+                                          </option>
+                                        </select>
+                                        <Tag className="w-2.5 h-2.5 text-current opacity-60 absolute right-1.5 pointer-events-none" />
+                                      </div>
+                                    </td>
+                                  )}
+                                  <td
+                                    className={`py-3 px-3 text-right font-mono tabular-nums font-semibold text-[#0F172A] transition-colors ${
+                                      dashboardSortField === 'price'
+                                        ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20'
+                                        : ''
+                                    }`}
+                                  >
                                     {row.price.toLocaleString('ko-KR', {
                                       minimumFractionDigits: 2,
                                       maximumFractionDigits: 2,
@@ -1242,7 +1746,11 @@ export default function App() {
                                     </span>
                                   </td>
                                   <td
-                                    className={`py-3 px-3 text-right font-mono tabular-nums font-semibold ${
+                                    className={`py-3 px-3 text-right font-mono tabular-nums font-semibold transition-colors ${
+                                      dashboardSortField === 'changePercent'
+                                        ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20'
+                                        : ''
+                                    } ${
                                       isPositive
                                         ? 'text-[#E11D48]'
                                         : isNegative
@@ -1254,7 +1762,13 @@ export default function App() {
                                       ? `+${row.changePercent.toFixed(2)}%`
                                       : `${row.changePercent.toFixed(2)}%`}
                                   </td>
-                                  <td className="py-3 px-3 text-right font-mono tabular-nums text-[#0F172A]">
+                                  <td
+                                    className={`py-3 px-3 text-right font-mono tabular-nums text-[#0F172A] transition-colors ${
+                                      dashboardSortField === 'marketCapMillions'
+                                        ? 'bg-[#F0FDF4]/50 dark:bg-emerald-950/20 font-semibold'
+                                        : ''
+                                    }`}
+                                  >
                                     {row.marketCapMillions.toLocaleString('ko-KR')}
                                   </td>
                                   <td className="py-3 px-3 text-right whitespace-nowrap">
@@ -1475,11 +1989,14 @@ export default function App() {
                 <div className="bg-white border border-[#E2E8F0] rounded-xl p-5 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-base font-bold text-[#0F172A]">
-                        내 관심종목 관리 (로컬 SQLite 영구 저장)
+                      <h2 className="text-base font-bold text-[#0F172A] flex items-center gap-2">
+                        <span>내 관심종목 및 그룹 관리</span>
+                        <span className="text-xs font-normal text-[#2E7D5B] bg-[#F0FDF4] border border-[#BBF7D0] px-2 py-0.5 rounded-full">
+                          총 {watchlist.length}종목 등록됨
+                        </span>
                       </h2>
                       <p className="text-xs text-[#64748B] mt-0.5">
-                        프로그램을 다시 열어도 목록이 그대로 유지됩니다. 대표 종목(AAPL, 600519, 00700)을 빠르게 추가하거나 삭제하고 재무제표를 확인할 수 있습니다.
+                        관심종목을 '성장주', '배당주', '가치주' 등의 그룹(폴더)으로 분류하고 필터링할 수 있습니다. 로컬 SQLite에 영구 저장됩니다.
                       </p>
                     </div>
 
@@ -1487,21 +2004,22 @@ export default function App() {
                       {['AAPL', '600519', '00700'].map((sym) => {
                         const exists = watchlist.some((w) => w.symbol === sym);
                         if (exists) return null;
+                        const defGrp = sym === '600519' ? '배당주' : '성장주';
                         return (
                           <button
                             key={sym}
                             type="button"
-                            onClick={() => handleAddWatchlist(sym)}
+                            onClick={() => handleAddWatchlist(sym, undefined, defGrp)}
                             className="px-3 py-1.5 text-xs font-semibold text-[#2E7D5B] bg-[#F0FDF4] border border-[#BBF7D0] hover:bg-[#DCFCE7] rounded-lg"
                           >
-                            + {namesKo[sym] || sym} ({sym}) 빠른 추가
+                            + {namesKo[sym] || sym} ({sym}) [{defGrp}]
                           </button>
                         );
                       })}
                       <button
                         type="button"
                         onClick={() => setIsAddModalOpen(true)}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#2E7D5B] hover:bg-[#25664A] rounded-lg"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#2E7D5B] hover:bg-[#25664A] rounded-lg shadow-sm"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>새 종목 추가</span>
@@ -1509,6 +2027,157 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* 그룹별 요약 통계 카드 */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setWatchlistGroupFilter('ALL')}
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        watchlistGroupFilter === 'ALL'
+                          ? 'border-[#0F172A] bg-[#F8FAFC] shadow-sm ring-1 ring-[#0F172A]'
+                          : 'border-[#E2E8F0] bg-white hover:bg-[#F8FAFC]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs text-[#64748B] font-medium">
+                        <span>전체 관심종목</span>
+                        <Folder className="w-3.5 h-3.5 text-slate-500" />
+                      </div>
+                      <div className="text-xl font-bold font-mono text-[#0F172A] mt-1.5">
+                        {watchlist.length}
+                        <span className="text-xs font-normal text-[#64748B] ml-1">종목</span>
+                      </div>
+                    </button>
+
+                    {availableGroups.map((grp) => {
+                      const itemsInGrp = watchlist.filter(
+                        (w) => (w.group || '기본') === grp
+                      );
+                      const avgChange =
+                        itemsInGrp.length > 0
+                          ? (
+                              itemsInGrp.reduce(
+                                (acc, cur) => acc + cur.changePercent,
+                                0
+                              ) / itemsInGrp.length
+                            ).toFixed(2)
+                          : '0.00';
+                      const isSelected = watchlistGroupFilter === grp;
+
+                      return (
+                        <button
+                          key={grp}
+                          type="button"
+                          onClick={() => setWatchlistGroupFilter(grp)}
+                          className={`p-3 rounded-xl border text-left transition-all ${
+                            isSelected
+                              ? 'border-[#2E7D5B] bg-[#F0FDF4] shadow-sm ring-1 ring-[#2E7D5B]'
+                              : 'border-[#E2E8F0] bg-white hover:bg-[#F8FAFC]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between text-xs font-semibold text-[#334155]">
+                            <span className="truncate">{grp}</span>
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                grp === '성장주'
+                                  ? 'bg-emerald-500'
+                                  : grp === '배당주'
+                                  ? 'bg-blue-500'
+                                  : grp === '가치주'
+                                  ? 'bg-amber-500'
+                                  : 'bg-slate-400'
+                              }`}
+                            />
+                          </div>
+                          <div className="flex items-baseline justify-between mt-1.5">
+                            <span className="text-xl font-bold font-mono text-[#0F172A]">
+                              {itemsInGrp.length}
+                              <span className="text-xs font-normal text-[#64748B] ml-1">종목</span>
+                            </span>
+                            <span
+                              className={`text-[11px] font-mono font-semibold ${
+                                Number(avgChange) > 0
+                                  ? 'text-[#E11D48]'
+                                  : Number(avgChange) < 0
+                                  ? 'text-[#2563EB]'
+                                  : 'text-[#64748B]'
+                              }`}
+                            >
+                              {Number(avgChange) > 0 ? `+${avgChange}%` : `${avgChange}%`}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* 그룹 필터 탭 바 및 새 그룹 생성 버튼 */}
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-[#F1F5F9] dark:border-slate-800">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs font-semibold text-[#64748B] flex items-center gap-1 mr-1">
+                        <Folder className="w-3.5 h-3.5 text-[#2E7D5B]" />
+                        필터링:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setWatchlistGroupFilter('ALL')}
+                        className={`px-3 py-1.5 text-xs rounded-lg transition-colors font-medium ${
+                          watchlistGroupFilter === 'ALL'
+                            ? 'bg-[#0F172A] text-white font-semibold shadow-sm'
+                            : 'bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] hover:bg-[#F1F5F9]'
+                        }`}
+                      >
+                        전체 그룹 ({watchlist.length})
+                      </button>
+                      {availableGroups.map((grp) => {
+                        const count = watchlist.filter(
+                          (w) => (w.group || '기본') === grp
+                        ).length;
+                        return (
+                          <button
+                            key={grp}
+                            type="button"
+                            onClick={() => setWatchlistGroupFilter(grp)}
+                            className={`px-3 py-1.5 text-xs rounded-lg transition-colors font-medium flex items-center gap-1.5 ${
+                              watchlistGroupFilter === grp
+                                ? 'bg-[#2E7D5B] text-white font-semibold shadow-sm'
+                                : 'bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] hover:bg-[#F1F5F9]'
+                            }`}
+                          >
+                            <span>{grp}</span>
+                            <span
+                              className={`px-1.5 py-0.2 rounded-full text-[10px] tabular-nums ${
+                                watchlistGroupFilter === grp
+                                  ? 'bg-white/20 text-white'
+                                  : 'bg-slate-200/80 text-slate-700'
+                              }`}
+                            >
+                              {count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newGrp = window.prompt(
+                          '추가할 새 그룹/폴더 이름을 입력하세요 (예: AI반도체, 고배당, 원자재, 바이오):'
+                        );
+                        if (newGrp && newGrp.trim()) {
+                          const clean = newGrp.trim();
+                          setWatchlistGroupFilter(clean);
+                          showNotice(`'${clean}' 그룹 필터가 활성화되었습니다. 종목 표에서 해당 그룹을 지정해보세요.`);
+                        }
+                      }}
+                      className="px-2.5 py-1 text-xs font-semibold text-[#2E7D5B] bg-[#F0FDF4] hover:bg-[#DCFCE7] border border-[#BBF7D0] rounded-lg transition-colors flex items-center gap-1"
+                    >
+                      <FolderPlus className="w-3.5 h-3.5" />
+                      <span>+ 새 그룹 등록</span>
+                    </button>
+                  </div>
+
+                  {/* 관심종목 테이블 */}
                   <div className="overflow-x-auto border border-[#E2E8F0] rounded-xl">
                     <table className="w-full text-left border-collapse">
                       <thead>
@@ -1517,6 +2186,7 @@ export default function App() {
                           <th className="py-3 px-4">종목명 (한글명)</th>
                           <th className="py-3 px-4">종목코드</th>
                           <th className="py-3 px-4">시장 · 통화</th>
+                          <th className="py-3 px-4 text-center">분류 그룹 / 폴더</th>
                           <th className="py-3 px-4 text-right">현재가</th>
                           <th className="py-3 px-4 text-right">등락률</th>
                           <th className="py-3 px-4 text-right">마지막 수신 시각</th>
@@ -1524,7 +2194,10 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#F1F5F9] text-xs">
-                        {watchlist.map((item, idx) => (
+                        {(watchlistGroupFilter === 'ALL'
+                          ? watchlist
+                          : watchlist.filter((w) => (w.group || '기본') === watchlistGroupFilter)
+                        ).map((item, idx) => (
                           <tr key={item.symbol} className="hover:bg-[#F8FAFC]">
                             <td className="py-3 px-4 font-mono tabular-nums text-[#64748B]">
                               {idx + 1}
@@ -1542,6 +2215,47 @@ export default function App() {
                                 ? '중국 A주'
                                 : '홍콩'}{' '}
                               · {item.currency}
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <div className="relative inline-flex items-center">
+                                <select
+                                  value={item.group || '기본'}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val === '__custom__') {
+                                      const custom = window.prompt(
+                                        '새 그룹/폴더 이름을 입력하세요 (예: 성장주, 배당주, 반도체):'
+                                      );
+                                      if (custom && custom.trim()) {
+                                        handleUpdateStockGroup(item.symbol, custom.trim());
+                                      }
+                                    } else {
+                                      handleUpdateStockGroup(item.symbol, val);
+                                    }
+                                  }}
+                                  className={`text-xs font-semibold px-2.5 py-1 rounded-lg border appearance-none cursor-pointer pr-6 focus:outline-none transition-colors ${getGroupBadgeClass(
+                                    item.group
+                                  )}`}
+                                  title="클릭하여 분류 그룹 변경"
+                                >
+                                  {availableGroups.map((grp) => (
+                                    <option
+                                      key={grp}
+                                      value={grp}
+                                      className="bg-white dark:bg-slate-800 text-[#0F172A] dark:text-white"
+                                    >
+                                      {grp}
+                                    </option>
+                                  ))}
+                                  <option
+                                    value="__custom__"
+                                    className="bg-white dark:bg-slate-800 text-[#2E7D5B] font-bold"
+                                  >
+                                    + 새 그룹 직접 입력...
+                                  </option>
+                                </select>
+                                <Tag className="w-3 h-3 text-current opacity-60 absolute right-1.5 pointer-events-none" />
+                              </div>
                             </td>
                             <td className="py-3 px-4 text-right font-mono tabular-nums font-semibold text-[#0F172A]">
                               {item.price.toLocaleString('ko-KR', {
@@ -1571,14 +2285,14 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => openStockAnalysis(item.symbol)}
-                                  className="px-2.5 py-1 text-xs font-semibold text-white bg-[#2E7D5B] hover:bg-[#25664A] rounded-md"
+                                  className="px-2.5 py-1 text-xs font-semibold text-white bg-[#2E7D5B] hover:bg-[#25664A] rounded-md transition-colors"
                                 >
                                   재무제표 확인
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteWatchlist(item.symbol)}
-                                  className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-md"
+                                  className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-md transition-colors"
                                 >
                                   삭제
                                 </button>
@@ -1602,6 +2316,7 @@ export default function App() {
                   autoSaveConfig={autoSaveConfig}
                   secondsUntilNextSave={secondsUntilNextSave}
                   snapshots={snapshots}
+                  apiCredentials={apiCredentials}
                   onUpdateAutoSaveConfig={handleUpdateAutoSaveConfig}
                   onCreateSnapshot={handleCreateSnapshot}
                   onRestoreSnapshot={handleRestoreSnapshot}
@@ -1611,6 +2326,7 @@ export default function App() {
                   onUpdateNameKo={handleUpdateNameKo}
                   onDeleteNameKo={handleDeleteNameKo}
                   onUpdateMapping={handleUpdateMapping}
+                  onUpdateApiCredentials={handleUpdateApiCredentials}
                 />
               )}
 
@@ -1624,6 +2340,7 @@ export default function App() {
                   autoSaveConfig={autoSaveConfig}
                   secondsUntilNextSave={secondsUntilNextSave}
                   snapshots={snapshots}
+                  apiCredentials={apiCredentials}
                   onUpdateAutoSaveConfig={handleUpdateAutoSaveConfig}
                   onCreateSnapshot={handleCreateSnapshot}
                   onRestoreSnapshot={handleRestoreSnapshot}
@@ -1633,6 +2350,7 @@ export default function App() {
                   onUpdateNameKo={handleUpdateNameKo}
                   onDeleteNameKo={handleDeleteNameKo}
                   onUpdateMapping={handleUpdateMapping}
+                  onUpdateApiCredentials={handleUpdateApiCredentials}
                 />
               )}
 
@@ -1692,7 +2410,8 @@ export default function App() {
                 if (!addSymbolQuery.trim()) return;
                 await handleAddWatchlist(
                   addSymbolQuery.trim(),
-                  addCustomNameKo.trim() || undefined
+                  addCustomNameKo.trim() || undefined,
+                  addCustomGroup.trim() || '기본'
                 );
                 setAddSymbolQuery('');
                 setAddCustomNameKo('');
@@ -1727,6 +2446,36 @@ export default function App() {
                 />
               </div>
 
+              <div>
+                <label className="block text-xs font-semibold text-[#334155] mb-1 flex items-center justify-between">
+                  <span>분류 그룹 / 폴더 (선택)</span>
+                  <span className="text-[11px] font-normal text-[#64748B]">선택 또는 직접 입력</span>
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {['성장주', '배당주', '가치주', '기본'].map((grp) => (
+                    <button
+                      key={grp}
+                      type="button"
+                      onClick={() => setAddCustomGroup(grp)}
+                      className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors ${
+                        addCustomGroup === grp
+                          ? 'bg-[#2E7D5B] text-white font-semibold shadow-sm'
+                          : 'bg-[#F8FAFC] text-[#475569] border border-[#CBD5E1] hover:bg-[#F1F5F9]'
+                      }`}
+                    >
+                      {grp}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={addCustomGroup}
+                  onChange={(e) => setAddCustomGroup(e.target.value)}
+                  placeholder="또는 새 그룹명 직접 입력 (예: AI/반도체, 고배당, 바이오)"
+                  className="w-full px-3 py-2 text-xs border border-[#CBD5E1] rounded-lg focus:outline-none focus:border-[#2E7D5B]"
+                />
+              </div>
+
               {/* 빠른 추천 종목 */}
               <div className="pt-1">
                 <div className="text-[11px] font-medium text-[#64748B] mb-1.5">
@@ -1734,13 +2483,13 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {[
-                    { sym: 'AAPL', ko: '애플' },
-                    { sym: '600519', ko: '귀주모태주' },
-                    { sym: '00700', ko: '텐센트홀딩스' },
-                    { sym: 'NVDA', ko: '엔비디아' },
-                    { sym: 'MSFT', ko: '마이크로소프트' },
-                    { sym: '300750', ko: 'CATL' },
-                    { sym: '09988', ko: '알리바바그룹' },
+                    { sym: 'AAPL', ko: '애플', grp: '성장주' },
+                    { sym: '600519', ko: '귀주모태주', grp: '배당주' },
+                    { sym: '00700', ko: '텐센트홀딩스', grp: '성장주' },
+                    { sym: 'NVDA', ko: '엔비디아', grp: '성장주' },
+                    { sym: 'MSFT', ko: '마이크로소프트', grp: '성장주' },
+                    { sym: '300750', ko: 'CATL', grp: '성장주' },
+                    { sym: '09988', ko: '알리바바그룹', grp: '가치주' },
                   ].map((q) => (
                     <button
                       key={q.sym}
@@ -1748,6 +2497,7 @@ export default function App() {
                       onClick={() => {
                         setAddSymbolQuery(q.sym);
                         setAddCustomNameKo(q.ko);
+                        setAddCustomGroup(q.grp);
                       }}
                       className="px-2 py-1 text-[11px] font-medium bg-[#F8FAFC] border border-[#E2E8F0] hover:bg-[#F1F5F9] rounded text-[#334155]"
                     >

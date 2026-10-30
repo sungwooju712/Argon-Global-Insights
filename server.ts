@@ -13,6 +13,8 @@ import {
   SEED_UNIVERSE,
 } from './src/data/seedUniverse.ts';
 import {
+  ApiCredentialsConfig,
+  ApiTestProbeResult,
   AutoSaveConfig,
   CollectorTestResult,
   FinancialStatementRow,
@@ -74,7 +76,8 @@ function initDatabase() {
       name_original TEXT NOT NULL,
       sector_ko TEXT NOT NULL,
       added_at TEXT NOT NULL,
-      sort_order INTEGER NOT NULL DEFAULT 0
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      group_name TEXT DEFAULT '기본'
     );
 
     CREATE TABLE IF NOT EXISTS quote_cache (
@@ -120,6 +123,20 @@ function initDatabase() {
     );
   `);
 
+  // group_name 컬럼 마이그레이션 (기존 SQLite DB 호환)
+  try {
+    db.exec("ALTER TABLE watchlist ADD COLUMN group_name TEXT DEFAULT '기본'");
+  } catch {
+    // 이미 컬럼이 존재할 경우 무시
+  }
+  try {
+    db.exec("UPDATE watchlist SET group_name = '기본' WHERE group_name IS NULL OR group_name = ''");
+    db.exec("UPDATE watchlist SET group_name = '성장주' WHERE symbol IN ('AAPL', 'NVDA', '00700') AND (group_name = '기본' OR group_name IS NULL)");
+    db.exec("UPDATE watchlist SET group_name = '배당주' WHERE symbol = '600519' AND (group_name = '기본' OR group_name IS NULL)");
+  } catch {
+    // 무시
+  }
+
   // 초기 names_ko.json 동기화
   const namesCount = (db.prepare('SELECT COUNT(*) as c FROM names_ko').get() as { c: number }).c;
   if (namesCount === 0) {
@@ -146,18 +163,23 @@ function initDatabase() {
     tx(Object.entries(initialMap));
   }
 
-  // 초기 관심종목 시드 (AAPL, 600519, 00700, NVDA)
+  // 초기 관심종목 시드 (AAPL: 성장주, 600519: 배당주, 00700: 성장주, NVDA: 성장주)
   const wlCount = (db.prepare('SELECT COUNT(*) as c FROM watchlist').get() as { c: number }).c;
   if (wlCount === 0) {
-    const defaultSymbols = ['AAPL', '600519', '00700', 'NVDA'];
+    const defaultSeeds = [
+      { sym: 'AAPL', group: '성장주' },
+      { sym: '600519', group: '배당주' },
+      { sym: '00700', group: '성장주' },
+      { sym: 'NVDA', group: '성장주' },
+    ];
     const insertWl = db.prepare(`
-      INSERT OR IGNORE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order, group_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const nowStr = formatTimestamp();
-    defaultSymbols.forEach((sym, idx) => {
+    defaultSeeds.forEach(({ sym, group }, idx) => {
       const info = detectMarketFromSymbol(sym);
-      insertWl.run(info.symbol, info.market, info.exchange, info.currency, info.nameOriginal, info.sectorKo, nowStr, idx);
+      insertWl.run(info.symbol, info.market, info.exchange, info.currency, info.nameOriginal, info.sectorKo, nowStr, idx, group);
     });
   }
 
@@ -259,18 +281,83 @@ function getUiPreferences(): WorkspaceStatePayload['uiPreferences'] {
   return JSON.parse(row.value_json);
 }
 
+function getApiCredentials(): ApiCredentialsConfig {
+  const row = db.prepare('SELECT value_json FROM settings WHERE key = ?').get('apiCredentials') as
+    | { value_json: string }
+    | undefined;
+  if (!row) {
+    const initial: ApiCredentialsConfig = {
+      finnhubApiKey: (process.env.FINNHUB_API_KEY || '').trim(),
+      secUserAgent: (process.env.SEC_USER_AGENT || 'GlobalStockInsight sungwoo.ju@gmail.com').trim(),
+      alphaVantageApiKey: (process.env.ALPHA_VANTAGE_API_KEY || '').trim(),
+      fmpApiKey: (process.env.FMP_API_KEY || '').trim(),
+      tushareToken: (process.env.TUSHARE_TOKEN || '').trim(),
+      updatedAt: formatTimestamp(),
+    };
+    db.prepare('INSERT OR REPLACE INTO settings (key, value_json) VALUES (?, ?)').run(
+      'apiCredentials',
+      JSON.stringify(initial)
+    );
+    return initial;
+  }
+  try {
+    const parsed = JSON.parse(row.value_json);
+    return {
+      finnhubApiKey: parsed.finnhubApiKey || '',
+      secUserAgent: parsed.secUserAgent || 'GlobalStockInsight sungwoo.ju@gmail.com',
+      alphaVantageApiKey: parsed.alphaVantageApiKey || '',
+      fmpApiKey: parsed.fmpApiKey || '',
+      tushareToken: parsed.tushareToken || '',
+      updatedAt: parsed.updatedAt || formatTimestamp(),
+    };
+  } catch {
+    return {
+      finnhubApiKey: '',
+      secUserAgent: 'GlobalStockInsight sungwoo.ju@gmail.com',
+      alphaVantageApiKey: '',
+      fmpApiKey: '',
+      tushareToken: '',
+      updatedAt: formatTimestamp(),
+    };
+  }
+}
+
+function saveApiCredentials(creds: Partial<ApiCredentialsConfig>): ApiCredentialsConfig {
+  const current = getApiCredentials();
+  const next: ApiCredentialsConfig = {
+    finnhubApiKey: creds.finnhubApiKey !== undefined ? creds.finnhubApiKey.trim() : current.finnhubApiKey,
+    secUserAgent: creds.secUserAgent !== undefined ? creds.secUserAgent.trim() : current.secUserAgent,
+    alphaVantageApiKey: creds.alphaVantageApiKey !== undefined ? creds.alphaVantageApiKey.trim() : current.alphaVantageApiKey,
+    fmpApiKey: creds.fmpApiKey !== undefined ? creds.fmpApiKey.trim() : current.fmpApiKey,
+    tushareToken: creds.tushareToken !== undefined ? creds.tushareToken.trim() : current.tushareToken,
+    updatedAt: formatTimestamp(),
+  };
+  db.prepare('INSERT OR REPLACE INTO settings (key, value_json) VALUES (?, ?)').run(
+    'apiCredentials',
+    JSON.stringify(next)
+  );
+  return next;
+}
+
 function buildCurrentWorkspaceStatePayload(): WorkspaceStatePayload {
-  const wlRows = db.prepare('SELECT symbol FROM watchlist ORDER BY sort_order ASC, added_at ASC').all() as {
+  const wlRows = db.prepare('SELECT symbol, group_name FROM watchlist ORDER BY sort_order ASC, added_at ASC').all() as {
     symbol: string;
+    group_name?: string;
   }[];
+  const watchlistGroups: Record<string, string> = {};
+  for (const r of wlRows) {
+    watchlistGroups[r.symbol] = r.group_name || '기본';
+  }
   return {
     version: '1.6.2',
     exportedAt: formatTimestamp(),
     watchlistSymbols: wlRows.map((r) => r.symbol),
+    watchlistGroups,
     namesKo: getAllNamesKo(),
     customMappings: getAllMapping(),
     autoSaveConfig: getAutoSaveConfig(),
     uiPreferences: getUiPreferences(),
+    apiCredentials: getApiCredentials(),
   };
 }
 
@@ -318,16 +405,17 @@ function recordWorkspaceSnapshot(
 
 function applyWorkspaceStatePayload(payload: WorkspaceStatePayload): void {
   const tx = db.transaction(() => {
-    // 1. 관심종목 복원
+    // 1. 관심종목 및 그룹 복원
     if (Array.isArray(payload.watchlistSymbols) && payload.watchlistSymbols.length > 0) {
       db.prepare('DELETE FROM watchlist').run();
       const insertWl = db.prepare(`
-        INSERT OR REPLACE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order, group_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const nowStr = formatTimestamp();
       payload.watchlistSymbols.forEach((sym, idx) => {
         const info = detectMarketFromSymbol(sym);
+        const group = payload.watchlistGroups?.[sym] || '기본';
         insertWl.run(
           info.symbol,
           info.market,
@@ -336,7 +424,8 @@ function applyWorkspaceStatePayload(payload: WorkspaceStatePayload): void {
           info.nameOriginal,
           info.sectorKo,
           nowStr,
-          idx
+          idx,
+          group
         );
       });
     }
@@ -378,6 +467,10 @@ function applyWorkspaceStatePayload(payload: WorkspaceStatePayload): void {
         'uiPreferences',
         JSON.stringify(payload.uiPreferences)
       );
+    }
+
+    if (payload.apiCredentials) {
+      saveApiCredentials(payload.apiCredentials);
     }
   });
 
@@ -440,7 +533,8 @@ async function getQuoteForStock(symbol: string, forceRefresh = false): Promise<W
 
   // 미국 주식인 경우 Finnhub API 호출 시도
   if (baseInfo.market === 'US') {
-    const apiKey = (process.env.FINNHUB_API_KEY || '').trim();
+    const creds = getApiCredentials();
+    const apiKey = (creds.finnhubApiKey || process.env.FINNHUB_API_KEY || '').trim();
     if (apiKey && apiKey !== 'MY_FINNHUB_API_KEY' && apiKey !== 'your_finnhub_api_key_here') {
       if (canCallFinnhub()) {
         try {
@@ -485,8 +579,8 @@ async function getQuoteForStock(symbol: string, forceRefresh = false): Promise<W
   const fetchedAt = cachedRow && warningKo ? cachedRow.fetched_at : formatTimestamp();
   const history = generateDailyHistory(cleanSym, price, 365);
 
-  const wlRow = db.prepare('SELECT added_at FROM watchlist WHERE symbol = ?').get(cleanSym) as
-    | { added_at: string }
+  const wlRow = db.prepare('SELECT added_at, group_name FROM watchlist WHERE symbol = ?').get(cleanSym) as
+    | { added_at: string; group_name?: string }
     | undefined;
 
   const item: WatchlistItem = {
@@ -507,6 +601,7 @@ async function getQuoteForStock(symbol: string, forceRefresh = false): Promise<W
     warningKo,
     addedAt: wlRow?.added_at || fetchedAt,
     history,
+    group: wlRow?.group_name || '기본',
   };
 
   db.prepare('INSERT OR REPLACE INTO quote_cache (symbol, payload_json, fetched_at, fetched_ms) VALUES (?, ?, ?, ?)').run(
@@ -609,7 +704,8 @@ async function getFinancialsForStock(
       warningKo = 'SEC EDGAR 초당 10회 호출 제한 보호가 작동하여 로컬 캐시 재무제표를 표시합니다.';
     } else {
       try {
-        const userAgent = process.env.SEC_USER_AGENT || 'GlobalStockInsight sungwoo.ju@gmail.com';
+        const creds = getApiCredentials();
+        const userAgent = (creds.secUserAgent || process.env.SEC_USER_AGENT || 'GlobalStockInsight sungwoo.ju@gmail.com').trim();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 4500);
         const secResp = await fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${baseInfo.cik}.json`, {
@@ -732,6 +828,7 @@ async function startServer() {
         mapping,
         autoSaveConfig,
         uiPreferences,
+        apiCredentials: getApiCredentials(),
         snapshots,
       });
     } catch (err) {
@@ -776,9 +873,11 @@ async function startServer() {
       const nowStr = formatTimestamp();
       const maxOrderRow = db.prepare('SELECT COALESCE(MAX(sort_order), 0) as m FROM watchlist').get() as { m: number };
 
+      const groupName = String(req.body?.group || '기본').trim() || '기본';
+
       db.prepare(`
-        INSERT OR REPLACE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO watchlist (symbol, market, exchange, currency, name_original, sector_ko, added_at, sort_order, group_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         info.symbol,
         info.market,
@@ -787,7 +886,8 @@ async function startServer() {
         info.nameOriginal,
         info.sectorKo,
         nowStr,
-        maxOrderRow.m + 1
+        maxOrderRow.m + 1,
+        groupName
       );
 
       // 사용자 지정 한글명이 함께 전달된 경우 사전에 등록
@@ -803,7 +903,7 @@ async function startServer() {
       const autoCfg = getAutoSaveConfig();
       let newSnapshot: SnapshotRecord | null = null;
       if (autoCfg.enabled && autoCfg.saveOnEveryChange) {
-        newSnapshot = recordWorkspaceSnapshot('auto', `관심종목 추가: ${item.nameKo} (${item.symbol})`);
+        newSnapshot = recordWorkspaceSnapshot('auto', `관심종목 추가: ${item.nameKo} (${item.symbol}) [${groupName}]`);
       }
 
       res.json({ item, snapshot: newSnapshot, namesKo: getAllNamesKo() });
@@ -831,6 +931,43 @@ async function startServer() {
     } catch (err) {
       console.error('Delete watchlist error:', err);
       res.status(500).json({ error: '관심종목 삭제 중 오류가 발생했습니다.' });
+    }
+  });
+
+  // 3-1. 관심종목 그룹/폴더 변경 (성장주, 배당주, 가치주 등)
+  app.put('/api/watchlist/:symbol/group', (req, res) => {
+    try {
+      const sym = String(req.params.symbol || '').trim().toUpperCase();
+      const groupName = String(req.body?.group || '기본').trim() || '기본';
+      const namesKo = getAllNamesKo();
+      const dispName = namesKo[sym] || sym;
+
+      db.prepare('UPDATE watchlist SET group_name = ? WHERE symbol = ?').run(groupName, sym);
+
+      // 캐시되어 있는 quote_cache의 group도 동기화
+      const cacheRow = db.prepare('SELECT payload_json FROM quote_cache WHERE symbol = ?').get(sym) as
+        | { payload_json: string }
+        | undefined;
+      if (cacheRow) {
+        try {
+          const parsed = JSON.parse(cacheRow.payload_json);
+          parsed.group = groupName;
+          db.prepare('UPDATE quote_cache SET payload_json = ? WHERE symbol = ?').run(JSON.stringify(parsed), sym);
+        } catch {
+          // ignore cache parse error
+        }
+      }
+
+      const autoCfg = getAutoSaveConfig();
+      let newSnapshot: SnapshotRecord | null = null;
+      if (autoCfg.enabled && autoCfg.saveOnEveryChange) {
+        newSnapshot = recordWorkspaceSnapshot('auto', `종목 분류 그룹 변경: ${dispName} (${sym}) -> ${groupName}`);
+      }
+
+      res.json({ symbol: sym, group: groupName, snapshot: newSnapshot });
+    } catch (err) {
+      console.error('Update watchlist group error:', err);
+      res.status(500).json({ error: '관심종목 그룹 변경 중 오류가 발생했습니다.' });
     }
   });
 
@@ -966,6 +1103,434 @@ async function startServer() {
     } catch (err) {
       console.error('Update autosave config error:', err);
       res.status(500).json({ error: '자동 저장 설정 변경 중 오류가 발생했습니다.' });
+    }
+  });
+
+  // 8-1. 데이터 수집 관련 API 인증키 조회 및 설정 업데이트
+  app.get('/api/api-credentials', (_req, res) => {
+    try {
+      res.json({ apiCredentials: getApiCredentials() });
+    } catch (err) {
+      console.error('Get API credentials error:', err);
+      res.status(500).json({ error: 'API 설정을 불러오는 중 오류가 발생했습니다.' });
+    }
+  });
+
+  app.put('/api/api-credentials', (req, res) => {
+    try {
+      const updated = saveApiCredentials(req.body || {});
+      const autoCfg = getAutoSaveConfig();
+      let newSnapshot: SnapshotRecord | null = null;
+      if (autoCfg.enabled && autoCfg.saveOnEveryChange) {
+        newSnapshot = recordWorkspaceSnapshot('auto', '데이터 수집 API 설정 및 인증키 업데이트');
+      }
+      res.json({ apiCredentials: updated, snapshot: newSnapshot });
+    } catch (err) {
+      console.error('Update API credentials error:', err);
+      res.status(500).json({ error: 'API 인증키 저장 중 오류가 발생했습니다.' });
+    }
+  });
+
+  // 8-2. 특정 API 또는 전체 API 연결 상태 실시간 테스트
+  async function probeApiCredential(
+    apiType: 'finnhub' | 'sec' | 'alpha_vantage' | 'fmp' | 'tushare',
+    overrideCreds?: Partial<ApiCredentialsConfig>
+  ): Promise<ApiTestProbeResult> {
+    const currentCreds = getApiCredentials();
+    const creds = { ...currentCreds, ...overrideCreds };
+
+    if (apiType === 'finnhub') {
+      const key = (creds.finnhubApiKey || '').trim();
+      if (!key || key === 'MY_FINNHUB_API_KEY' || key === 'your_finnhub_api_key_here') {
+        return {
+          apiType: 'finnhub',
+          nameKo: 'Finnhub 시세 API',
+          status: 'unconfigured',
+          latencyMs: 0,
+          messageKo: 'Finnhub API 키가 미입력 상태입니다. 무료 키 등록 시 미국 실시간 시세가 활성화됩니다.',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+        };
+      }
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const resp = await fetch(
+          `https://finnhub.io/api/v1/quote?symbol=AAPL&token=${encodeURIComponent(key)}`,
+          { signal: ctrl.signal }
+        );
+        clearTimeout(t);
+        const latency = Date.now() - start;
+        if (resp.ok) {
+          const data = (await resp.json()) as { c?: number; dp?: number; d?: number };
+          if (typeof data.c === 'number' && data.c > 0) {
+            return {
+              apiType: 'finnhub',
+              nameKo: 'Finnhub 시세 API',
+              status: 'success',
+              latencyMs: latency,
+              messageKo: `Finnhub 실시간 시세 연동 성공! AAPL 현재가: $${data.c.toFixed(2)} (${
+                data.dp !== undefined ? (data.dp >= 0 ? `+${data.dp}%` : `${data.dp}%`) : ''
+              })`,
+              testedAt: formatTimestamp(),
+              endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+              sampleData: `현재가: $${data.c}, 변동: $${data.d || 0} (${data.dp || 0}%)`,
+            };
+          }
+        }
+        if (resp.status === 401 || resp.status === 403) {
+          return {
+            apiType: 'finnhub',
+            nameKo: 'Finnhub 시세 API',
+            status: 'error',
+            latencyMs: latency,
+            messageKo: `Finnhub 인증 실패 (HTTP ${resp.status}): 입력한 API 키가 유효하지 않습니다.`,
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+          };
+        }
+        if (resp.status === 429) {
+          return {
+            apiType: 'finnhub',
+            nameKo: 'Finnhub 시세 API',
+            status: 'warning',
+            latencyMs: latency,
+            messageKo: 'Finnhub 분당 60회 무료 호출 한도에 도달했습니다. 잠시 후 재시도하세요.',
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+          };
+        }
+        return {
+          apiType: 'finnhub',
+          nameKo: 'Finnhub 시세 API',
+          status: 'warning',
+          latencyMs: latency,
+          messageKo: `Finnhub 서버 응답 코드: HTTP ${resp.status}`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+        };
+      } catch (err: unknown) {
+        return {
+          apiType: 'finnhub',
+          nameKo: 'Finnhub 시세 API',
+          status: 'error',
+          latencyMs: Date.now() - start,
+          messageKo: `Finnhub 서버 요청 시간 초과 또는 네트워크 오류: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://finnhub.io/api/v1/quote?symbol=AAPL',
+        };
+      }
+    }
+
+    if (apiType === 'sec') {
+      const ua = (creds.secUserAgent || '').trim();
+      if (!ua) {
+        return {
+          apiType: 'sec',
+          nameKo: 'SEC EDGAR 공시 시스템',
+          status: 'unconfigured',
+          latencyMs: 0,
+          messageKo: 'SEC User-Agent가 비어 있습니다. "애플리케이션명 이메일" 형식을 입력하세요.',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+        };
+      }
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const resp = await fetch('https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json', {
+          headers: { 'User-Agent': ua, Accept: 'application/json' },
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        const latency = Date.now() - start;
+        if (resp.ok) {
+          return {
+            apiType: 'sec',
+            nameKo: 'SEC EDGAR 공시 시스템',
+            status: 'success',
+            latencyMs: latency,
+            messageKo: 'SEC EDGAR XBRL companyfacts API 정상 연결! Apple Inc. (CIK0000320193) 재무 공시 수신 확인 완료',
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+            sampleData: 'Apple Inc. (CIK 0000320193) XBRL companyfacts 수신 성공',
+          };
+        }
+        if (resp.status === 403) {
+          return {
+            apiType: 'sec',
+            nameKo: 'SEC EDGAR 공시 시스템',
+            status: 'error',
+            latencyMs: latency,
+            messageKo: 'SEC 정책 거부 (HTTP 403): User-Agent에 유효한 연락처 이메일이 포함되어야 합니다. (예: GlobalStockInsight your_email@example.com)',
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+          };
+        }
+        return {
+          apiType: 'sec',
+          nameKo: 'SEC EDGAR 공시 시스템',
+          status: 'warning',
+          latencyMs: latency,
+          messageKo: `SEC EDGAR 서버 응답 코드: HTTP ${resp.status}`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+        };
+      } catch {
+        return {
+          apiType: 'sec',
+          nameKo: 'SEC EDGAR 공시 시스템',
+          status: 'warning',
+          latencyMs: Date.now() - start,
+          messageKo: 'SEC 외부 네트워크 지연 감지: 로컬 SQLite 캐시 스냅샷(연간 5년·분기 8회)으로 정상 폴백 지원됩니다.',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
+        };
+      }
+    }
+
+    if (apiType === 'alpha_vantage') {
+      const key = (creds.alphaVantageApiKey || '').trim();
+      if (!key) {
+        return {
+          apiType: 'alpha_vantage',
+          nameKo: 'Alpha Vantage API',
+          status: 'unconfigured',
+          latencyMs: 0,
+          messageKo: 'Alpha Vantage API 키 미설정 (선택 사항: 글로벌 시세 및 보조 지표)',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL',
+        };
+      }
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const resp = await fetch(
+          `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL&apikey=${encodeURIComponent(key)}`,
+          { signal: ctrl.signal }
+        );
+        clearTimeout(t);
+        const latency = Date.now() - start;
+        const data = (await resp.json()) as Record<string, unknown>;
+        const quote = data['Global Quote'] as Record<string, string> | undefined;
+        if (quote && Object.keys(quote).length > 0) {
+          return {
+            apiType: 'alpha_vantage',
+            nameKo: 'Alpha Vantage API',
+            status: 'success',
+            latencyMs: latency,
+            messageKo: `Alpha Vantage 글로벌 시세 연동 성공! AAPL: $${quote['05. price'] || '-'}`,
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL',
+            sampleData: JSON.stringify(quote),
+          };
+        }
+        if (data['Note'] || data['Information']) {
+          return {
+            apiType: 'alpha_vantage',
+            nameKo: 'Alpha Vantage API',
+            status: 'warning',
+            latencyMs: latency,
+            messageKo: `Alpha Vantage 무료 호출 한도(분당 5회 / 일일 25회) 안내: ${String(
+              data['Note'] || data['Information']
+            )}`,
+            testedAt: formatTimestamp(),
+            endpointUrl: 'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL',
+          };
+        }
+        return {
+          apiType: 'alpha_vantage',
+          nameKo: 'Alpha Vantage API',
+          status: 'error',
+          latencyMs: latency,
+          messageKo: 'Alpha Vantage API 키가 유효하지 않거나 데이터가 비어 있습니다.',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL',
+        };
+      } catch (err: unknown) {
+        return {
+          apiType: 'alpha_vantage',
+          nameKo: 'Alpha Vantage API',
+          status: 'error',
+          latencyMs: Date.now() - start,
+          messageKo: `Alpha Vantage 요청 실패: ${err instanceof Error ? err.message : String(err)}`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=AAPL',
+        };
+      }
+    }
+
+    if (apiType === 'fmp') {
+      const key = (creds.fmpApiKey || '').trim();
+      if (!key) {
+        return {
+          apiType: 'fmp',
+          nameKo: 'Financial Modeling Prep (FMP)',
+          status: 'unconfigured',
+          latencyMs: 0,
+          messageKo: 'FMP API 키 미설정 (선택 사항: 다년도 재무제표 보조 데이터)',
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://financialmodelingprep.com/api/v3/profile/AAPL',
+        };
+      }
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const resp = await fetch(
+          `https://financialmodelingprep.com/api/v3/profile/AAPL?apikey=${encodeURIComponent(key)}`,
+          { signal: ctrl.signal }
+        );
+        clearTimeout(t);
+        const latency = Date.now() - start;
+        if (resp.ok) {
+          const data = (await resp.json()) as { companyName?: string }[];
+          if (Array.isArray(data) && data.length > 0) {
+            return {
+              apiType: 'fmp',
+              nameKo: 'Financial Modeling Prep (FMP)',
+              status: 'success',
+              latencyMs: latency,
+              messageKo: `FMP 기업 프로필 연동 확인 성공! (${data[0]?.companyName || 'AAPL'})`,
+              testedAt: formatTimestamp(),
+              endpointUrl: 'https://financialmodelingprep.com/api/v3/profile/AAPL',
+              sampleData: `기업명: ${data[0]?.companyName}`,
+            };
+          }
+        }
+        return {
+          apiType: 'fmp',
+          nameKo: 'Financial Modeling Prep (FMP)',
+          status: 'error',
+          latencyMs: latency,
+          messageKo: `FMP API 키 인증 실패 (HTTP ${resp.status})`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://financialmodelingprep.com/api/v3/profile/AAPL',
+        };
+      } catch (err: unknown) {
+        return {
+          apiType: 'fmp',
+          nameKo: 'Financial Modeling Prep (FMP)',
+          status: 'error',
+          latencyMs: Date.now() - start,
+          messageKo: `FMP 요청 오류: ${err instanceof Error ? err.message : String(err)}`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'https://financialmodelingprep.com/api/v3/profile/AAPL',
+        };
+      }
+    }
+
+    // tushare
+    const token = (creds.tushareToken || '').trim();
+    if (!token) {
+      return {
+        apiType: 'tushare',
+        nameKo: 'Tushare Pro (중국 A주/홍콩)',
+        status: 'unconfigured',
+        latencyMs: 0,
+        messageKo: 'Tushare Pro 토큰 미설정 (선택 사항: 미등록 시 AKShare 내장 캐시로 자동 대체)',
+        testedAt: formatTimestamp(),
+        endpointUrl: 'http://api.tushare.pro',
+      };
+    }
+    const start = Date.now();
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      const resp = await fetch('http://api.tushare.pro', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_name: 'stock_basic',
+          token,
+          params: { list_status: 'L', limit: 1 },
+          fields: 'ts_code,symbol,name',
+        }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      const latency = Date.now() - start;
+      if (resp.ok) {
+        const data = (await resp.json()) as { code: number; msg?: string };
+        if (data.code === 0) {
+          return {
+            apiType: 'tushare',
+            nameKo: 'Tushare Pro (중국 A주/홍콩)',
+            status: 'success',
+            latencyMs: latency,
+            messageKo: 'Tushare Pro 토큰 인증 및 중국 A주 마스터 데이터 정상 수신 확인!',
+            testedAt: formatTimestamp(),
+            endpointUrl: 'http://api.tushare.pro',
+          };
+        }
+        return {
+          apiType: 'tushare',
+          nameKo: 'Tushare Pro (중국 A주/홍콩)',
+          status: 'error',
+          latencyMs: latency,
+          messageKo: `Tushare 토큰 오류: ${data.msg || '코드 ' + data.code}`,
+          testedAt: formatTimestamp(),
+          endpointUrl: 'http://api.tushare.pro',
+        };
+      }
+      return {
+        apiType: 'tushare',
+        nameKo: 'Tushare Pro (중국 A주/홍콩)',
+        status: 'warning',
+        latencyMs: latency,
+        messageKo: `Tushare 서버 응답 코드: HTTP ${resp.status}`,
+        testedAt: formatTimestamp(),
+        endpointUrl: 'http://api.tushare.pro',
+      };
+    } catch (err: unknown) {
+      return {
+        apiType: 'tushare',
+        nameKo: 'Tushare Pro (중국 A주/홍콩)',
+        status: 'error',
+        latencyMs: Date.now() - start,
+        messageKo: `Tushare Pro 연결 실패: ${err instanceof Error ? err.message : String(err)}`,
+        testedAt: formatTimestamp(),
+        endpointUrl: 'http://api.tushare.pro',
+      };
+    }
+  }
+
+  app.post('/api/test-api-credential', async (req, res) => {
+    try {
+      const apiType = String(req.body?.apiType || 'all').toLowerCase();
+      const overrideCreds = req.body?.creds as Partial<ApiCredentialsConfig> | undefined;
+
+      if (apiType === 'all') {
+        const types: ('finnhub' | 'sec' | 'alpha_vantage' | 'fmp' | 'tushare')[] = [
+          'finnhub',
+          'sec',
+          'alpha_vantage',
+          'fmp',
+          'tushare',
+        ];
+        const results = await Promise.all(types.map((t) => probeApiCredential(t, overrideCreds)));
+        res.json({ results, testedAt: formatTimestamp() });
+        return;
+      }
+
+      if (['finnhub', 'sec', 'alpha_vantage', 'fmp', 'tushare'].includes(apiType)) {
+        const result = await probeApiCredential(
+          apiType as 'finnhub' | 'sec' | 'alpha_vantage' | 'fmp' | 'tushare',
+          overrideCreds
+        );
+        res.json({ result, testedAt: formatTimestamp() });
+        return;
+      }
+
+      res.status(400).json({ error: '유효하지 않은 API 타입입니다.' });
+    } catch (err) {
+      console.error('Test API credential error:', err);
+      res.status(500).json({ error: 'API 연결 테스트 중 오류가 발생했습니다.' });
     }
   });
 
